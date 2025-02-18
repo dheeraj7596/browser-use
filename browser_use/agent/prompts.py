@@ -98,6 +98,9 @@ class SystemPrompt:
 10. Extraction:
 - If your task is to find information or do research - call extract_content on the specific pages to get and store the information.
 
+11. CLARIFICATION QUESTIONS:
+- If you are confused or need help with the task or need a clarification from the user, ask a clarification question to the human. They will help you. For example, if you are not able to find a button or some information. Or if you notice there are multiple answers.
+
 """
 		text += f'   - use maximum {self.max_actions_per_step} actions per sequence'
 		return text

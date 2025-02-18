@@ -436,6 +436,14 @@ class Controller:
 				logger.error(msg)
 				return ActionResult(error=msg, include_in_memory=True)
 
+		@self.registry.action(
+			description='Ask user for information',
+		)
+		def ask_human(question: str) -> ActionResult:
+			answer = input(f'\n{question}\nInput: ')
+			output = f'You asked the human a question and they responded with """{answer}"""'
+			return ActionResult(extracted_content=output, include_in_memory=True)
+
 	def action(self, description: str, **kwargs):
 		"""Decorator for registering custom actions
 
