@@ -97,14 +97,15 @@ class Agent:
 		max_error_length: int = 400,
 		max_actions_per_step: int = 10,
 		tool_call_in_content: bool = True,
-		initial_actions: Optional[List[Dict[str, Dict[str, Any]]]] = None,
+		initial_actions: Optional[List[List[Dict[str, Dict[str, Any]]]]] = None,
 		# Cloud Callbacks
 		register_new_step_callback: Callable[['BrowserState', 'AgentOutput', int], None] | None = None,
 		register_done_callback: Callable[['AgentHistoryList'], None] | None = None,
 		tool_calling_method: Optional[str] = 'auto',
 		page_extraction_llm: Optional[BaseChatModel] = None,
 		planner_llm: Optional[BaseChatModel] = None,
-		planner_interval: int = 1,  # Run planner every N steps
+		planner_interval: int = 1,  # Run planner every N steps,
+		number_of_browser_windows: int = 1,
 	):
 		self.agent_id = str(uuid.uuid4())  # unique identifier for the agent
 		self.sensitive_data = sensitive_data
@@ -139,18 +140,16 @@ class Agent:
 		self.injected_browser_context = browser_context is not None
 		self.message_context = message_context
 
-		# Initialize browser first if needed
-		self.browser = browser if browser is not None else (None if browser_context else Browser())
+		self.number_of_browser_windows = number_of_browser_windows
 
-		# Initialize browser context
-		if browser_context:
-			self.browser_context = browser_context
-		elif self.browser:
-			self.browser_context = BrowserContext(browser=self.browser, config=self.browser.config.new_context_config)
-		else:
-			# If neither is provided, create both new
-			self.browser = Browser()
-			self.browser_context = BrowserContext(browser=self.browser)
+
+		# multiple browser window handling
+		if initial_actions is not None:
+			assert len(initial_actions) == number_of_browser_windows, "Number of initial actions should be equal to number of browser windows"
+		assert browser is None and browser_context is None, "We are creating multiple instances of it, not sure how it can be handled if a browser is given"
+
+		self.browser = [Browser() for _ in range(self.number_of_browser_windows)]
+		self.browser_context = [BrowserContext(browser=self.browser[i]) for i in range(self.number_of_browser_windows)]
 
 		self.system_prompt_class = system_prompt_class
 
@@ -185,13 +184,13 @@ class Agent:
 		self.register_done_callback = register_done_callback
 
 		# Tracking variables
-		self.history: AgentHistoryList = AgentHistoryList(history=[])
-		self.n_steps = 1
+		self.history: List[AgentHistoryList] = [AgentHistoryList(history=[]) for _ in range(self.number_of_browser_windows)]
+		self.n_steps = [1 for _  in range(self.number_of_browser_windows)]
 		self.consecutive_failures = 0
 		self.max_failures = max_failures
 		self.retry_delay = retry_delay
 		self.validate_output = validate_output
-		self.initial_actions = self._convert_initial_actions(initial_actions) if initial_actions else None
+		self.initial_actions = [self._convert_initial_actions(_initial_actions) for _initial_actions in initial_actions] if initial_actions else None
 		if save_conversation_path:
 			logger.info(f'Saving conversation to {save_conversation_path}')
 
@@ -271,21 +270,21 @@ class Agent:
 
 	@observe(name='agent.step', ignore_output=True, ignore_input=True)
 	@time_execution_async('--step')
-	async def step(self, step_info: Optional[AgentStepInfo] = None) -> None:
+	async def step(self, step_info: Optional[AgentStepInfo] = None, window_index: Optional[int] = None) -> None:
 		"""Execute one step of the task"""
-		logger.info(f'📍 Step {self.n_steps}')
+		logger.info(f'📍 Step {self.n_steps[window_index]} | Window {window_index}')
 		state = None
 		model_output = None
 		result: list[ActionResult] = []
 
 		try:
-			state = await self.browser_context.get_state()
+			state = await self.browser_context[window_index].get_state()
 
 			self._check_if_stopped_or_paused()
 			self.message_manager.add_state_message(state, self._last_result, step_info, self.use_vision)
 
 			# Run planner at specified intervals if planner is configured
-			if self.planner_llm and self.n_steps % self.planning_interval == 0:
+			if self.planner_llm and self.n_steps[window_index] % self.planning_interval == 0:
 				plan = await self._run_planner()
 				# add plan before last state message
 				self.message_manager.add_plan(plan, position=-1)
@@ -295,12 +294,12 @@ class Agent:
 			self._check_if_stopped_or_paused()
 
 			try:
-				model_output = await self.get_next_action(input_messages)
+				model_output = await self.get_next_action(input_messages, window_index)
 
 				if self.register_new_step_callback:
-					self.register_new_step_callback(state, model_output, self.n_steps)
+					self.register_new_step_callback(state, model_output, self.n_steps[window_index])
 
-				self._save_conversation(input_messages, model_output)
+				self._save_conversation(input_messages, model_output, window_index)
 				self.message_manager._remove_last_state_message()  # we dont want the whole state in the chat history
 
 				self._check_if_stopped_or_paused()
@@ -313,7 +312,7 @@ class Agent:
 
 			result: list[ActionResult] = await self.controller.multi_act(
 				model_output.action,
-				self.browser_context,
+				self.browser_context[window_index],
 				page_extraction_llm=self.page_extraction_llm,
 				sensitive_data=self.sensitive_data,
 				check_break_if_paused=lambda: self._check_if_stopped_or_paused(),
@@ -343,7 +342,7 @@ class Agent:
 			self.telemetry.capture(
 				AgentStepTelemetryEvent(
 					agent_id=self.agent_id,
-					step=self.n_steps,
+					step=self.n_steps[window_index],
 					actions=actions,
 					consecutive_failures=self.consecutive_failures,
 					step_error=[r.error for r in result if r.error] if result else ['No result'],
@@ -353,7 +352,7 @@ class Agent:
 				return
 
 			if state:
-				self._make_history_item(model_output, state, result)
+				self._make_history_item(model_output, state, result, window_index)
 
 	async def _handle_step_error(self, error: Exception) -> list[ActionResult]:
 		"""Handle all types of errors that can occur during a step"""
@@ -388,6 +387,7 @@ class Agent:
 		model_output: AgentOutput | None,
 		state: BrowserState,
 		result: list[ActionResult],
+		window_index: Optional[int] = None,
 	) -> None:
 		"""Create and store history item"""
 		interacted_element = None
@@ -408,7 +408,7 @@ class Agent:
 
 		history_item = AgentHistory(model_output=model_output, result=result, state=state_history)
 
-		self.history.history.append(history_item)
+		self.history[window_index].history.append(history_item)
 
 	THINK_TAGS = re.compile(r'<think>.*?</think>', re.DOTALL)
 
@@ -428,7 +428,7 @@ class Agent:
 		return input_messages
 
 	@time_execution_async('--get_next_action')
-	async def get_next_action(self, input_messages: list[BaseMessage]) -> AgentOutput:
+	async def get_next_action(self, input_messages: list[BaseMessage], window_index: Optional[int] = None) -> AgentOutput:
 		"""Get next action from LLM based on current state"""
 		converted_input_messages = self._convert_input_messages(input_messages, self.model_name)
 
@@ -457,7 +457,7 @@ class Agent:
 		# cut the number of actions to max_actions_per_step
 		parsed.action = parsed.action[: self.max_actions_per_step]
 		self._log_response(parsed)
-		self.n_steps += 1
+		self.n_steps[window_index] += 1
 
 		return parsed
 
@@ -476,7 +476,7 @@ class Agent:
 		for i, action in enumerate(response.action):
 			logger.info(f'🛠️  Action {i + 1}/{len(response.action)}: {action.model_dump_json(exclude_unset=True)}')
 
-	def _save_conversation(self, input_messages: list[BaseMessage], response: Any) -> None:
+	def _save_conversation(self, input_messages: list[BaseMessage], response: Any, window_index: Optional[int] = None) -> None:
 		"""Save conversation history to file if path is specified"""
 		if not self.save_conversation_path:
 			return
@@ -485,7 +485,7 @@ class Agent:
 		os.makedirs(os.path.dirname(self.save_conversation_path), exist_ok=True)
 
 		with open(
-			self.save_conversation_path + f'_{self.n_steps}.txt',
+			self.save_conversation_path + f'_{self.n_steps[window_index]}.txt',
 			'w',
 			encoding=self.save_conversation_path_encoding,
 		) as f:
@@ -538,64 +538,82 @@ class Agent:
 		try:
 			self._log_agent_run()
 
-			# Execute initial actions if provided
-			if self.initial_actions:
-				result = await self.controller.multi_act(
-					self.initial_actions,
-					self.browser_context,
-					check_for_new_elements=False,
-					page_extraction_llm=self.page_extraction_llm,
-					check_break_if_paused=lambda: self._check_if_stopped_or_paused(),
-					available_file_paths=self.available_file_paths,
-				)
-				self._last_result = result
+			async def run_browser_trajectory(window_index, context):
+				# Execute initial actions if provided
+				if self.initial_actions:
+					result = await self.controller.multi_act(
+						self.initial_actions[window_index],
+						context,
+						check_for_new_elements=False,
+						page_extraction_llm=self.page_extraction_llm,
+						check_break_if_paused=lambda: self._check_if_stopped_or_paused(),
+						available_file_paths=self.available_file_paths,
+					)
 
-			for step in range(max_steps):
-				if self._too_many_failures():
-					break
+				for step in range(max_steps):
+					if self._too_many_failures():
+						break
 
-				# Check control flags before each step
-				if not await self._handle_control_flags():
-					break
+					# Check control flags before each step
+					if not await self._handle_control_flags():
+						break
 
-				await self.step()
+					await self.step(window_index=window_index)
 
-				if self.history.is_done():
-					if self.validate_output and step < max_steps - 1:
-						if not await self._validate_output():
-							continue
+					if self.history[window_index].is_done():
+						if self.validate_output and step < max_steps - 1:
+							if not await self._validate_output(window_index=window_index):
+								continue
 
-					logger.info('✅ Task completed successfully')
-					if self.register_done_callback:
-						self.register_done_callback(self.history)
-					break
-			else:
-				logger.info('❌ Failed to complete task in maximum steps')
+						logger.info('✅ Task completed successfully')
+						if self.register_done_callback:
+							assert False, "Need to update this for multiple browser windows"
+							self.register_done_callback(self.history)
+						break
+				else:
+					logger.info('❌ Failed to complete task in maximum steps')
+
+			# Run all browser trajectories in parallel
+			await asyncio.gather(*[
+				run_browser_trajectory(i, context)
+				for i, context in enumerate(self.browser_context)
+			])
 
 			return self.history
 		finally:
-			self.telemetry.capture(
-				AgentEndTelemetryEvent(
-					agent_id=self.agent_id,
-					success=self.history.is_done(),
-					steps=self.n_steps,
-					max_steps_reached=self.n_steps >= max_steps,
-					errors=self.history.errors(),
+			for browser_idx, (history, n_steps) in enumerate(zip(self.history, self.n_steps)):
+				self.telemetry.capture(
+					AgentEndTelemetryEvent(
+						agent_id=f"{self.agent_id}_browser_{browser_idx}",
+						success=history.is_done(),
+						steps=n_steps,
+						max_steps_reached=n_steps >= max_steps,
+						errors=history.errors(),
+					)
 				)
-			)
 
+			# Close all browser contexts in parallel
 			if not self.injected_browser_context:
-				await self.browser_context.close()
+				await asyncio.gather(*[
+					context.close() 
+					for context in self.browser_context
+				])
 
+			# Close all browsers in parallel
 			if not self.injected_browser and self.browser:
-				await self.browser.close()
+				await asyncio.gather(*[
+					browser.close() 
+					for browser in self.browser
+				])
 
 			if self.generate_gif:
-				output_path: str = 'agent_history.gif'
-				if isinstance(self.generate_gif, str):
-					output_path = self.generate_gif
-
-				self.create_history_gif(output_path=output_path)
+				for idx, history in enumerate(self.history):
+					if isinstance(self.generate_gif, str):
+						base, ext = os.path.splitext(self.generate_gif)
+						output_path = f'{base}_browser_{idx}{ext}'
+					else:
+						output_path = f'agent_history_browser_{idx}.gif'
+					self.create_history_gif(history, output_path=output_path)
 
 	def _too_many_failures(self) -> bool:
 		"""Check if we should stop due to too many failures"""
@@ -616,7 +634,7 @@ class Agent:
 				return False
 		return True
 
-	async def _validate_output(self) -> bool:
+	async def _validate_output(self, window_index: Optional[int] = None) -> bool:
 		"""Validate the output of the last action is what the user wanted"""
 		system_msg = (
 			f'You are a validator of an agent who interacts with a browser. '
@@ -629,8 +647,8 @@ class Agent:
 			f' example: {{"is_valid": false, "reason": "The user wanted to search for "cat photos", but the agent searched for "dog photos" instead."}}'
 		)
 
-		if self.browser_context.session:
-			state = await self.browser_context.get_state()
+		if self.browser_context[window_index].session:
+			state = await self.browser_context[window_index].get_state()
 			content = AgentMessagePrompt(
 				state=state,
 				result=self._last_result,
@@ -667,6 +685,7 @@ class Agent:
 		max_retries: int = 3,
 		skip_failures: bool = True,
 		delay_between_actions: float = 2.0,
+		window_index: Optional[int] = None,
 	) -> list[ActionResult]:
 		"""
 		Rerun a saved history of actions with error handling and retry logic.
@@ -680,11 +699,12 @@ class Agent:
 		Returns:
 				List of action results
 		"""
+		assert False, "Below is for single browser window, need to update it for multiple browser windows"
 		# Execute initial actions if provided
 		if self.initial_actions:
 			await self.controller.multi_act(
 				self.initial_actions,
-				self.browser_context,
+				self.browser_context[window_index],
 				check_for_new_elements=False,
 				page_extraction_llm=self.page_extraction_llm,
 				check_break_if_paused=lambda: self._check_if_stopped_or_paused(),
@@ -728,7 +748,7 @@ class Agent:
 
 		return results
 
-	async def _execute_history_step(self, history_item: AgentHistory, delay: float) -> list[ActionResult]:
+	async def _execute_history_step(self, history_item: AgentHistory, delay: float, window_index: Optional[int] = None) -> list[ActionResult]:
 		"""Execute a single step from history with element validation"""
 		state = await self.browser_context.get_state()
 		if not state or not history_item.model_output:
@@ -747,7 +767,7 @@ class Agent:
 
 		result = await self.controller.multi_act(
 			updated_actions,
-			self.browser_context,
+			self.browser_context[window_index],
 			page_extraction_llm=self.page_extraction_llm,
 			check_break_if_paused=lambda: self._check_if_stopped_or_paused(),
 			sensitive_data=self.sensitive_data,
@@ -798,10 +818,12 @@ class Agent:
 		"""Save the history to a file"""
 		if not file_path:
 			file_path = 'AgentHistory.json'
-		self.history.save_to_file(file_path)
+		for idx, history in enumerate(self.history):
+			history.save_to_file(file_path.replace(".json", f"_browser_{idx}.json"))
 
 	def create_history_gif(
 		self,
+		history: AgentHistoryList,
 		output_path: str = 'agent_history.gif',
 		duration: int = 3000,
 		show_goals: bool = True,
@@ -814,13 +836,13 @@ class Agent:
 		line_spacing: float = 1.5,
 	) -> None:
 		"""Create a GIF from the agent's history with overlaid task and goal text."""
-		if not self.history.history:
+		if not history.history:
 			logger.warning('No history to create GIF from')
 			return
 
 		images = []
 		# if history is empty or first screenshot is None, we can't create a gif
-		if not self.history.history or not self.history.history[0].state.screenshot:
+		if not history.history or not history.history[0].state.screenshot:
 			logger.warning('No history or first screenshot to create GIF from')
 			return
 
@@ -890,7 +912,7 @@ class Agent:
 		if show_task and self.task:
 			task_frame = self._create_task_frame(
 				self.task,
-				self.history.history[0].state.screenshot,
+				history.history[0].state.screenshot,
 				title_font,
 				regular_font,
 				logo,
@@ -899,7 +921,7 @@ class Agent:
 			images.append(task_frame)
 
 		# Process each history item
-		for i, item in enumerate(self.history.history, 1):
+		for i, item in enumerate(history.history, 1):
 			if not item.state.screenshot:
 				continue
 
