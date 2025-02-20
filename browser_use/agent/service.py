@@ -29,7 +29,7 @@ from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, ValidationError
 
 from browser_use.agent.message_manager.service import MessageManager
-from browser_use.agent.prompts import AgentMessagePrompt, PlannerPrompt, SystemPrompt
+from browser_use.agent.prompts import AgentMessagePrompt, PlannerPrompt, ExplorerPrompt, SystemPrompt
 from browser_use.agent.views import (
 	ActionResult,
 	AgentError,
@@ -105,6 +105,7 @@ class Agent:
 		page_extraction_llm: Optional[BaseChatModel] = None,
 		planner_llm: Optional[BaseChatModel] = None,
 		planner_interval: int = 1,  # Run planner every N steps,
+		explorer_llm: Optional[BaseChatModel] = None,
 		number_of_browser_windows: int = 1,
 	):
 		self.agent_id = str(uuid.uuid4())  # unique identifier for the agent
@@ -145,6 +146,7 @@ class Agent:
 		else:
 			self.number_of_browser_windows = number_of_browser_windows
 
+		self.explorer_llm = explorer_llm
 
 		# multiple browser window handling
 		if initial_actions is not None:
@@ -260,6 +262,16 @@ class Agent:
 				self.planner_model_name = 'Unknown'
 		else:
 			self.planner_model_name = None
+
+		if self.explorer_llm:
+			if hasattr(self.explorer_llm, 'model_name'):
+				self.explorer_model_name = self.explorer_llm.model_name  # type: ignore
+			elif hasattr(self.explorer_llm, 'model'):
+				self.explorer_model_name = self.explorer_llm.model  # type: ignore
+			else:
+				self.explorer_model_name = 'Unknown'
+		else:
+			self.explorer_model_name = None
 
 	def _setup_action_models(self) -> None:
 		"""Setup dynamic action models from controller's registry"""
@@ -594,6 +606,13 @@ class Agent:
 						break
 				else:
 					logger.info('❌ Failed to complete task in maximum steps')
+
+			# Run planner at specified intervals if planner is configured
+			if self.explorer_llm:
+				exploration_strategies = await self._run_explorer()
+				for window_index, strategy in enumerate(exploration_strategies):
+					# add plan before last state message
+					self.message_manager[window_index].add_plan(strategy, position=-1)
 
 			# Run all browser trajectories in parallel
 			await asyncio.gather(*[
@@ -1331,7 +1350,7 @@ class Agent:
 
 			planner_messages[-1] = HumanMessage(content=new_msg)
 
-		planner_messages = self._convert_input_messages(planner_messages, self.planner_model_name)
+		planner_messages = self._convert_input_messages(planner_messages, self.planner_model_name, window_index)
 		# Get planner output
 		response = await self.planner_llm.ainvoke(planner_messages)
 		plan = response.content
@@ -1348,3 +1367,38 @@ class Agent:
 			logger.info(f'Plan: {plan}')
 
 		return plan
+
+	async def _run_explorer(self, window_index: int = 0) -> Optional[str]:
+		"""Run the explorer to suggest multiple parallel trajectories to explore"""
+		if not self.explorer_llm:
+			return None
+
+		# Create explorer message history using full message history
+		explorer_messages = [
+			ExplorerPrompt(self.action_descriptions).get_system_message(self.number_of_browser_windows),
+			*self.message_manager[window_index].get_messages(),  # Use full message history except the first
+		]
+
+		explorer_messages = self._convert_input_messages(explorer_messages, self.explorer_model_name, window_index)
+		# Get planner output
+		response = await self.explorer_llm.ainvoke(explorer_messages)
+		plan = response.content
+		# if deepseek-reasoner, remove think tags
+		if self.planner_model_name == 'deepseek-reasoner':
+			plan = self._remove_think_tags(plan)
+		try:
+			plan_json = json.loads(plan)
+			logger.info(f'Exploration JSON Keys:\n{list(plan_json.keys())}')
+			for i in range(self.number_of_browser_windows):
+				assert f"path_{i}" in plan_json
+			logger.info(f'Exploration Analysis:\n{json.dumps(plan_json, indent=4)}')
+		except json.JSONDecodeError as e:
+			logger.info(f'Exploration Analysis:\n{plan}')
+			raise e
+		except Exception as e:
+			logger.debug(f'Error parsing exploration analysis: {e}')
+			logger.info(f'Exploration: {plan}')
+			raise e
+
+		plans = ["PLAN: " + plan_json[f"path_{i}"] for i in range(self.number_of_browser_windows)]
+		return plans

@@ -262,3 +262,35 @@ Ignore the other AI messages output structures.
 
 Keep your responses concise and focused on actionable insights."""
 		)
+
+
+class ExplorerPrompt(SystemPrompt):
+	def get_system_message(self, number_of_windows: int) -> SystemMessage:
+		return SystemMessage(
+			content=f"""You are an exploration agent that reason about the current state and suggest multiple paths that can be explored SIMULTANEOUSLY to reach the final destination. Note that multiple sub-agents would explore these suggested paths in parallel. Therefore, suggest DIFFERENT strategies that might lead to success. 
+Your role is to:
+1. Analyze the current state and history
+2. Evaluate progress towards the ultimate goal
+3. Suggest {number_of_windows} paths that can be explored simultaneously. 
+
+Inside your messages, there will be AI messages from different agents with different formats.
+
+Your output format should be always a JSON object with the following fields:
+{{
+    "state_analysis": "Brief analysis of the current state and what has been done so far",
+    "progress_evaluation": "Evaluation of progress towards the ultimate goal (as percentage and description)",
+    "path_0": "Express the plan for the path-0 that can be taken",
+    "path_1": "Express the plan for the path-1 that can be taken",
+    "path_2": "Express the plan for the path-2 that can be taken",
+    .
+    .
+    .
+}}
+
+The 'path_k' key above corresponds to the kth-path. For example path_0 for for the zeroth and path_1 for the first. Make sure you generate ONLY {number_of_windows} paths.
+
+Ignore the other AI messages output structures.
+
+Keep your responses concise and focused on actionable insights."""
+		)
+
