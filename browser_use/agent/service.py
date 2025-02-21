@@ -29,7 +29,7 @@ from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, ValidationError
 
 from browser_use.agent.message_manager.service import MessageManager
-from browser_use.agent.prompts import AgentMessagePrompt, PlannerPrompt, ExplorerPrompt, SystemPrompt
+from browser_use.agent.prompts import AgentMessagePrompt, PlannerPrompt, ExplorerPrompt, ConsolidatorPrompt, SystemPrompt
 from browser_use.agent.views import (
 	ActionResult,
 	AgentError,
@@ -106,6 +106,8 @@ class Agent:
 		planner_llm: Optional[BaseChatModel] = None,
 		planner_interval: int = 1,  # Run planner every N steps,
 		explorer_llm: Optional[BaseChatModel] = None,
+		exploring_step: Optional[int] = None,
+		consolidator_llm: Optional[BaseChatModel] = None,
 		number_of_browser_windows: int = 1,
 	):
 		self.agent_id = str(uuid.uuid4())  # unique identifier for the agent
@@ -123,7 +125,6 @@ class Agent:
 		if self.save_conversation_path and '/' not in self.save_conversation_path:
 			self.save_conversation_path = f'{self.save_conversation_path}/'
 		self.save_conversation_path_encoding = save_conversation_path_encoding
-		self._last_result = None
 		self.include_attributes = include_attributes
 		self.max_error_length = max_error_length
 		self.generate_gif = generate_gif
@@ -147,7 +148,10 @@ class Agent:
 			self.number_of_browser_windows = number_of_browser_windows
 
 		self.explorer_llm = explorer_llm
+		self.exploring_step = exploring_step
+		self.consolidator_llm = consolidator_llm
 
+		self._last_result = [None] * self.number_of_browser_windows
 		# multiple browser window handling
 		if initial_actions is not None:
 			assert len(initial_actions) == number_of_browser_windows, "Number of initial actions should be equal to number of browser windows"
@@ -273,6 +277,16 @@ class Agent:
 		else:
 			self.explorer_model_name = None
 
+		if self.consolidator_llm:
+			if hasattr(self.consolidator_llm, 'model_name'):
+				self.consolidator_model_name = self.consolidator_llm.model_name  # type: ignore
+			elif hasattr(self.consolidator_llm, 'model'):
+				self.consolidator_model_name = self.consolidator_llm.model  # type: ignore
+			else:
+				self.consolidator_model_name = 'Unknown'
+		else:
+			self.consolidator_model_name = None
+
 	def _setup_action_models(self) -> None:
 		"""Setup dynamic action models from controller's registry"""
 		self.ActionModel = self.controller.registry.create_action_model()
@@ -304,7 +318,7 @@ class Agent:
 
 	@observe(name='agent.step', ignore_output=True, ignore_input=True)
 	@time_execution_async('--step')
-	async def step(self, window_index: int, step_info: Optional[AgentStepInfo] = None) -> None:
+	async def step(self, window_index: int, step_info: Optional[AgentStepInfo] = None, exploration_strategy: Optional[str] = None) -> None:
 		"""Execute one step of the task"""
 		logger.info(f'📍 Step {self.n_steps[window_index]} | Window {window_index}')
 		state = None
@@ -315,7 +329,12 @@ class Agent:
 			state = await self.browser_context[window_index].get_state()
 
 			self._check_if_stopped_or_paused()
-			self.message_manager[window_index].add_state_message(state, self._last_result, step_info, self.use_vision)
+			self.message_manager[window_index].add_state_message(state, self._last_result[window_index], step_info, self.use_vision)
+
+			# Run planner at specified intervals if planner is configured
+			if self.explorer_llm and self.n_steps[window_index] == self.exploring_step and exploration_strategy is not None:
+				logger.info(f"Adding Plan to Window index {window_index}: {exploration_strategy}")
+				self.message_manager[window_index].add_plan(exploration_strategy, position=-1)
 
 			# Run planner at specified intervals if planner is configured
 			if self.planner_llm and self.n_steps[window_index] % self.planning_interval == 0:
@@ -352,7 +371,7 @@ class Agent:
 				check_break_if_paused=lambda: self._check_if_stopped_or_paused(),
 				available_file_paths=self.available_file_paths,
 			)
-			self._last_result = result
+			self._last_result[window_index] = result
 
 			if len(result) > 0 and result[-1].is_done:
 				logger.info(f'📄 Result: {result[-1].extracted_content}')
@@ -361,7 +380,7 @@ class Agent:
 
 		except InterruptedError:
 			logger.debug('Agent paused')
-			self._last_result = [
+			self._last_result[window_index] = [
 				ActionResult(
 					error='The agent was paused - now continuing actions might need to be repeated', include_in_memory=True
 				)
@@ -369,7 +388,7 @@ class Agent:
 			return
 		except Exception as e:
 			result = await self._handle_step_error(e, window_index)
-			self._last_result = result
+			self._last_result[window_index] = result
 
 		finally:
 			actions = [a.model_dump(exclude_unset=True) for a in model_output.action] if model_output else []
@@ -573,7 +592,7 @@ class Agent:
 		try:
 			self._log_agent_run()
 
-			async def run_browser_trajectory(window_index, context):
+			async def run_browser_trajectory(window_index, context, exploration_strategy=None):
 				# Execute initial actions if provided
 				if self.initial_actions and self.initial_actions[window_index]:
 					result = await self.controller.multi_act(
@@ -593,7 +612,7 @@ class Agent:
 					if not await self._handle_control_flags():
 						break
 
-					await self.step(window_index=window_index)
+					await self.step(window_index=window_index, exploration_strategy=exploration_strategy)
 
 					if self.history[window_index].is_done():
 						if self.validate_output and step < max_steps - 1:
@@ -610,15 +629,17 @@ class Agent:
 			# Run planner at specified intervals if planner is configured
 			if self.explorer_llm:
 				exploration_strategies = await self._run_explorer()
-				for window_index, strategy in enumerate(exploration_strategies):
-					# add plan before last state message
-					self.message_manager[window_index].add_plan(strategy, position=-1)
+			else:
+				exploration_strategies = [None] * self.number_of_browser_windows
 
 			# Run all browser trajectories in parallel
 			await asyncio.gather(*[
-				run_browser_trajectory(window_id, context)
+				run_browser_trajectory(window_id, context, exploration_strategies[window_id])
 				for window_id, context in enumerate(self.browser_context)
 			])
+
+			if self.consolidator_llm:
+				await self._run_consolidator()
 
 			return self.history
 		finally:
@@ -692,7 +713,7 @@ class Agent:
 			state = await self.browser_context[window_index].get_state()
 			content = AgentMessagePrompt(
 				state=state,
-				result=self._last_result,
+				result=self._last_result[window_index],
 				include_attributes=self.include_attributes,
 				max_error_length=self.max_error_length,
 			)
@@ -715,7 +736,7 @@ class Agent:
 		if not is_valid:
 			logger.info(f'❌ Validator decision: {parsed.reason}')
 			msg = f'The output is not yet correct. {parsed.reason}.'
-			self._last_result = [ActionResult(extracted_content=msg, include_in_memory=True)]
+			self._last_result[window_index] = [ActionResult(extracted_content=msg, include_in_memory=True)]
 		else:
 			logger.info(f'✅ Validator decision: {parsed.reason}')
 		return is_valid
@@ -1380,7 +1401,8 @@ class Agent:
 		]
 
 		explorer_messages = self._convert_input_messages(explorer_messages, self.explorer_model_name, window_index)
-		# Get planner output
+		# Get explorer output
+		del explorer_messages[1] # deleting the system message of browser agent as it would confuse the explorer agent.
 		response = await self.explorer_llm.ainvoke(explorer_messages)
 		plan = response.content
 		# if deepseek-reasoner, remove think tags
@@ -1400,5 +1422,48 @@ class Agent:
 			logger.info(f'Exploration: {plan}')
 			raise e
 
-		plans = ["PLAN: " + plan_json[f"path_{i}"] for i in range(self.number_of_browser_windows)]
+		plans = ["PLAN TO FOLLOW: " + plan_json[f"path_{i}"] for i in range(self.number_of_browser_windows)]
 		return plans
+
+
+	async def _run_consolidator(self):
+		results = []
+		for window_index in range(self.number_of_browser_windows):
+			last_result = self.history[window_index].final_result()
+			if last_result is None:
+				continue
+			results.append(last_result)
+
+		if len(results) == 0:
+			return
+
+		content = f"TASK: {self.message_manager[0].task} \n\n"
+		for i, result in enumerate(results):
+			content = content + "Result-" + str(i) + " : " + result + "\n"
+
+		consolidator_messages = [
+			ConsolidatorPrompt(self.action_descriptions).get_system_message(),  # Assuming this returns a SystemMessage
+			HumanMessage(content=content)
+		]
+		# Get consolidator output
+		response = await self.consolidator_llm.ainvoke(consolidator_messages)
+		consolidated_response = response.content
+		# if deepseek-reasoner, remove think tags
+		if self.consolidator_model_name == 'deepseek-reasoner':
+			consolidated_response = self._remove_think_tags(consolidated_response)
+		try:
+			consolidated_json = json.loads(consolidated_response)
+			logger.info(f'Consolidation JSON Keys:\n{list(consolidated_json.keys())}')
+			assert "consolidated_response" in consolidated_json
+			logger.info(f'Consolidation Analysis:\n{json.dumps(consolidated_json, indent=4)}')
+		except json.JSONDecodeError as e:
+			logger.info(f'Consolidation Analysis:\n{consolidated_response}')
+			raise e
+		except Exception as e:
+			logger.debug(f'Error parsing consolidation: {e}')
+			logger.info(f'Consolidation: {consolidated_response}')
+			raise e
+
+		logger.info(f'✅📄 Consolidated Result: {consolidated_json["consolidated_response"]}')
+
+

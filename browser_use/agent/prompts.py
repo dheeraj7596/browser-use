@@ -267,7 +267,7 @@ Keep your responses concise and focused on actionable insights."""
 class ExplorerPrompt(SystemPrompt):
 	def get_system_message(self, number_of_windows: int) -> SystemMessage:
 		return SystemMessage(
-			content=f"""You are an exploration agent that reason about the current state and suggest multiple paths that can be explored SIMULTANEOUSLY to reach the final destination. Note that multiple sub-agents would explore these suggested paths in parallel. Therefore, suggest DIFFERENT strategies that might lead to success. 
+			content=f"""You are an exploration agent who guides the Browser agent that controls web browser. Your job is to reason about the current state and suggest multiple paths for the browser agent that can be explored SIMULTANEOUSLY to reach the final destination. Note that multiple sub-agents would explore these suggested paths in parallel. Therefore, suggest DIFFERENT strategies that might lead to success. 
 Your role is to:
 1. Analyze the current state and history
 2. Evaluate progress towards the ultimate goal
@@ -294,3 +294,21 @@ Ignore the other AI messages output structures.
 Keep your responses concise and focused on actionable insights."""
 		)
 
+
+class ConsolidatorPrompt(SystemPrompt):
+	def get_system_message(self) -> SystemMessage:
+		return SystemMessage(
+			content="""You are a consolidator agent that reason about the given results and consolidate them based on whether they solve the provided task.			 
+	Your role is to:
+	1. Analyze the results.
+	2. Evaluate them against the provided task.
+	3. Shortlist the accepted results that are appropriate and useful for the task.
+	4. Consolidate the accepted results and generate the response.  
+
+	Your output format should be always a JSON object with the following fields AND NOTHING ELSE:
+	{
+		"analysis": "Analyze the results and verify their validity for the task.",
+	    "consolidated_response": "Consolidated Response of the accepted results from the provided results". 
+	}
+	"""
+		)
