@@ -588,7 +588,7 @@ class Agent:
 		)
 
 	@observe(name='agent.run', ignore_output=True)
-	async def run(self, max_steps: int = 100) -> str:
+	async def run(self, max_steps: int = 100) -> list[AgentHistoryList]:
 		"""Execute the task with maximum number of steps"""
 		try:
 			self._log_agent_run()
@@ -642,7 +642,7 @@ class Agent:
 			if self.consolidator_llm:
 				await self._run_consolidator()
 
-			return self._consolidated_result
+			return self.history
 		finally:
 			for browser_idx, (history, n_steps) in enumerate(zip(self.history, self.n_steps)):
 				self.telemetry.capture(

@@ -31,5 +31,5 @@ async def run_agent(task: Task):
         consolidator_llm=ChatOpenAI(model="gpt-4o"),
         generate_gif=os.path.join("/Users/dheerajmekala/Work/browser-use/agent_history.gif"),
     )
-    result = await agent.run()
-    return {"result": result}
+    _ = await agent.run()
+    return {"result": agent._consolidated_result}
