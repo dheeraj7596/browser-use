@@ -152,6 +152,7 @@ class Agent:
 		self.consolidator_llm = consolidator_llm
 
 		self._last_result = [None] * self.number_of_browser_windows
+		self._consolidated_result = None
 		# multiple browser window handling
 		if initial_actions is not None:
 			assert len(initial_actions) == number_of_browser_windows, "Number of initial actions should be equal to number of browser windows"
@@ -587,7 +588,7 @@ class Agent:
 		)
 
 	@observe(name='agent.run', ignore_output=True)
-	async def run(self, max_steps: int = 100) -> AgentHistoryList:
+	async def run(self, max_steps: int = 100) -> str:
 		"""Execute the task with maximum number of steps"""
 		try:
 			self._log_agent_run()
@@ -641,7 +642,7 @@ class Agent:
 			if self.consolidator_llm:
 				await self._run_consolidator()
 
-			return self.history
+			return self._consolidated_result
 		finally:
 			for browser_idx, (history, n_steps) in enumerate(zip(self.history, self.n_steps)):
 				self.telemetry.capture(
@@ -1464,6 +1465,7 @@ class Agent:
 			logger.info(f'Consolidation: {consolidated_response}')
 			raise e
 
+		self._consolidated_result = consolidated_json["consolidated_response"]
 		logger.info(f'✅📄 Consolidated Result: {consolidated_json["consolidated_response"]}')
 
 

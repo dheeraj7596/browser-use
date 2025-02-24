@@ -1,5 +1,6 @@
 # ours
 test_run.py
+ui/browser-agent/node_modules
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
