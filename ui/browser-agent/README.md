@@ -24,6 +24,7 @@ npm run dev
 ## Backend Launch
 
 - Open a new terminal tab
+- Move to project home.
 - Install uvicorn via pip
 ```bash
 pip install uvicorn
