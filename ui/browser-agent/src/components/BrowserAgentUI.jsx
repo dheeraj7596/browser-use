@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send } from 'lucide-react';
+import { Send, ChevronLeft, ChevronRight } from 'lucide-react';
 
 const BrowserAgentUI = () => {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState([]);
   const [screenshots, setScreenshots] = useState([]);
+  const [activeTab, setActiveTab] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const wsRef = useRef(null);
   const chatContainerRef = useRef(null);
@@ -23,7 +24,9 @@ const BrowserAgentUI = () => {
         const data = JSON.parse(event.data);
         if (data.type === 'screenshot') {
           setScreenshots(prev => {
+            // Create a copy of the previous array
             const newScreenshots = [...prev];
+            // Set the screenshot at the specific index
             newScreenshots[data.window_index] = data.screenshot;
             return newScreenshots;
           });
@@ -58,6 +61,7 @@ const BrowserAgentUI = () => {
     const userMessage = input;
     setInput('');
     setScreenshots([]);
+    setActiveTab(0);
     setMessages(prev => [...prev, { type: 'user', content: userMessage }]);
     setIsLoading(true);
 
@@ -77,6 +81,22 @@ const BrowserAgentUI = () => {
       setIsLoading(false);
     }
   };
+
+  const goToNextTab = () => {
+    if (activeTab < screenshots.length - 1) {
+      setActiveTab(activeTab + 1);
+    }
+  };
+
+  const goToPrevTab = () => {
+    if (activeTab > 0) {
+      setActiveTab(activeTab - 1);
+    }
+  };
+
+  // Filter out undefined screenshots and get the length
+  const validScreenshots = screenshots.filter(Boolean);
+  const windowCount = validScreenshots.length;
 
   return (
     <div className="fixed inset-0 bg-orange-50">
@@ -141,29 +161,62 @@ const BrowserAgentUI = () => {
             </div>
           </div>
 
-          {/* Screenshots Section */}
+          {/* Screenshots Section with Tabs */}
           <div className="w-1/2 p-6">
-            <div className="bg-white rounded-lg shadow-lg h-full p-6">
-              <div className="grid grid-cols-2 grid-rows-2 gap-4 h-full">
-                {Array(4).fill(null).map((_, index) => (
-                  <div
-                    key={index}
-                    className="border rounded-lg overflow-hidden bg-gray-100"
+            <div className="bg-white rounded-lg shadow-lg h-full p-6 flex flex-col">
+              {/* Tab Navigation */}
+              {windowCount > 0 && (
+                <div className="flex justify-between items-center mb-4">
+                  <button
+                    onClick={goToPrevTab}
+                    disabled={activeTab === 0}
+                    className="p-2 rounded-full bg-orange-100 text-orange-800 hover:bg-orange-200 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {screenshots[index] ? (
-                      <img
-                        src={`data:image/png;base64,${screenshots[index]}`}
-                        alt={`Browser ${index + 1}`}
-                        className="w-full h-full object-contain"
-                      />
-                    ) : (
-                      <div className="h-full w-full flex items-center justify-center">
-                        <span className="text-gray-400">Window {index + 1}</span>
-                      </div>
-                    )}
+                    <ChevronLeft size={24} />
+                  </button>
+                  <div className="text-lg font-medium">
+                    Window {activeTab + 1} of {windowCount}
                   </div>
-                ))}
+                  <button
+                    onClick={goToNextTab}
+                    disabled={activeTab >= windowCount - 1}
+                    className="p-2 rounded-full bg-orange-100 text-orange-800 hover:bg-orange-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <ChevronRight size={24} />
+                  </button>
+                </div>
+              )}
+
+              {/* Tab Content */}
+              <div className="flex-1 border rounded-lg bg-gray-100 overflow-hidden">
+                {windowCount > 0 && activeTab < windowCount ? (
+                  <img
+                    src={`data:image/png;base64,${validScreenshots[activeTab]}`}
+                    alt={`Browser ${activeTab + 1}`}
+                    className="w-full h-full object-contain"
+                  />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center">
+                    <span className="text-gray-400">
+                      {isLoading ? "Loading browser windows..." : "No browser windows available"}
+                    </span>
+                  </div>
+                )}
               </div>
+
+              {/* Tab Indicators - Only show if we have multiple windows */}
+              {windowCount > 1 && (
+                <div className="flex justify-center space-x-2 mt-4">
+                  {validScreenshots.map((_, index) => (
+                    <button
+                      key={index}
+                      onClick={() => setActiveTab(index)}
+                      className={`w-3 h-3 rounded-full ${activeTab === index ? 'bg-orange-600' : 'bg-orange-300'}`}
+                      aria-label={`View window ${index + 1}`}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>
