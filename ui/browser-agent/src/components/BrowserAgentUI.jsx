@@ -1,6 +1,73 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Send, ChevronLeft, ChevronRight } from 'lucide-react';
 
+// Helper function for robust URL detection and linking
+const linkify = (text) => {
+  if (!text || typeof text !== 'string') return text;
+
+  // Create an array to hold all the segments (text and links)
+  const segments = [];
+  let currentPosition = 0;
+  const textLength = text.length;
+
+  // Define a regex for URL detection
+  // This handles URLs with or without http/https, with or without www
+  // Also handles URLs inside markdown links and parentheses
+  const urlRegex = /\bhttps?:\/\/[-A-Za-z0-9+&@#/%?=~_|!:,.;]*[-A-Za-z0-9+&@#/%=~_|]/g;
+
+  // Find all matches
+  let match;
+  while ((match = urlRegex.exec(text)) !== null) {
+    const matchStart = match.index;
+    const matchEnd = matchStart + match[0].length;
+
+    // Add text before the URL
+    if (matchStart > currentPosition) {
+      segments.push({
+        type: 'text',
+        content: text.substring(currentPosition, matchStart)
+      });
+    }
+
+    // Add the URL as a link
+    segments.push({
+      type: 'link',
+      url: match[0],
+      content: match[0]
+    });
+
+    // Update position
+    currentPosition = matchEnd;
+  }
+
+  // Add any remaining text after the last URL
+  if (currentPosition < textLength) {
+    segments.push({
+      type: 'text',
+      content: text.substring(currentPosition)
+    });
+  }
+
+  // Convert segments to React elements
+  return segments.map((segment, index) => {
+    if (segment.type === 'text') {
+      return <span key={`text-${index}`}>{segment.content}</span>;
+    } else {
+      return (
+        <a
+          key={`link-${index}`}
+          href={segment.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-blue-600 hover:underline break-all"
+        >
+          {segment.content}
+        </a>
+      );
+    }
+  });
+};
+
 const BrowserAgentUI = () => {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState([]);
@@ -24,9 +91,7 @@ const BrowserAgentUI = () => {
         const data = JSON.parse(event.data);
         if (data.type === 'screenshot') {
           setScreenshots(prev => {
-            // Create a copy of the previous array
             const newScreenshots = [...prev];
-            // Set the screenshot at the specific index
             newScreenshots[data.window_index] = data.screenshot;
             return newScreenshots;
           });
@@ -125,7 +190,13 @@ const BrowserAgentUI = () => {
                           : 'bg-gray-100 text-gray-800'
                       }`}
                     >
-                      <pre className="whitespace-pre-wrap font-sans">{message.content}</pre>
+                      {message.type === 'user' ? (
+                        <pre className="whitespace-pre-wrap font-sans">{message.content}</pre>
+                      ) : (
+                        <div className="whitespace-pre-wrap font-sans">
+                          {linkify(message.content)}
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}
