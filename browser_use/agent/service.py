@@ -40,6 +40,7 @@ from browser_use.agent.views import (
 )
 from browser_use.browser.browser import Browser
 from browser_use.browser.context import BrowserContext
+from browser_use.browser.callback import BrowserStatusCallback
 from browser_use.browser.views import BrowserState, BrowserStateHistory
 from browser_use.controller.registry.views import ActionModel
 from browser_use.controller.service import Controller
@@ -106,6 +107,7 @@ class Agent:
 		planner_llm: Optional[BaseChatModel] = None,
 		planner_interval: int = 1,  # Run planner every N steps,
 		explorer_llm: Optional[BaseChatModel] = None,
+		browser_callback: Optional[BrowserStatusCallback] = None,
 		exploring_step: Optional[int] = None,
 		consolidator_llm: Optional[BaseChatModel] = None,
 		number_of_browser_windows: int = 1,
@@ -174,6 +176,7 @@ class Agent:
 			self.browser_context = [BrowserContext(browser=self.browser[i]) for i in
 									range(self.number_of_browser_windows)]
 
+		self.browser_callback = browser_callback
 		self.system_prompt_class = system_prompt_class
 
 		# Telemetry setup
@@ -328,6 +331,11 @@ class Agent:
 
 		try:
 			state = await self.browser_context[window_index].get_state()
+
+			if self.browser_callback is not None:
+				print(f"Sending screenshot for window {window_index}")  # Debug log
+				screenshot_b64 = await self.browser_context[window_index].take_screenshot()
+				await self.browser_callback.send_screenshot(screenshot_b64, window_index)
 
 			self._check_if_stopped_or_paused()
 			self.message_manager[window_index].add_state_message(state, self._last_result[window_index], step_info, self.use_vision)
