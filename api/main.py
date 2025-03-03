@@ -48,10 +48,12 @@ async def run_agent(task: Task):
         agent = Agent(
             task=task.task,
             llm=ChatOpenAI(model="gpt-4o"),
-            number_of_browser_windows=4,
+            number_of_browser_windows=3,
             explorer_llm=ChatOpenAI(model="gpt-4o"),
             exploring_step=1,
             consolidator_llm=ChatOpenAI(model="gpt-4o"),
+            planner_llm=ChatOpenAI(model="gpt-4o"),
+            planner_interval=1,
             # generate_gif=os.path.join("/Users/dheerajmekala/Work/browser-use/agent_history_browser.gif"),
             generate_gif=False,
             browser_callback=browser_callback  # Pass the callback

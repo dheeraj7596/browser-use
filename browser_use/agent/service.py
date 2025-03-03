@@ -71,7 +71,7 @@ class Agent:
 		browser_context: BrowserContext | None = None,
 		controller: Controller = Controller(),
 		use_vision: bool = True,
-		use_vision_for_planner: bool = False,
+		use_vision_for_planner: bool = True,
 		save_conversation_path: Optional[str] = None,
 		save_conversation_path_encoding: Optional[str] = 'utf-8',
 		max_failures: int = 3,
@@ -344,9 +344,8 @@ class Agent:
 			if self.explorer_llm and self.n_steps[window_index] == self.exploring_step and exploration_strategy is not None:
 				logger.info(f"Adding Plan to Window index {window_index}: {exploration_strategy}")
 				self.message_manager[window_index].add_plan(exploration_strategy, position=-1)
-
 			# Run planner at specified intervals if planner is configured
-			if self.planner_llm and self.n_steps[window_index] % self.planning_interval == 0:
+			elif self.planner_llm and self.n_steps[window_index] % self.planning_interval == 0:
 				plan = await self._run_planner(window_index)
 				# add plan before last state message
 				self.message_manager[window_index].add_plan(plan, position=-1)
@@ -1354,15 +1353,45 @@ class Agent:
 		return converted_actions
 
 	async def _run_planner(self, window_index: int) -> Optional[str]:
+		def get_agent_summary(input_messages):
+			total_summary = ""
+			for message in input_messages:
+				if isinstance(message, AIMessage):
+					for tool_call in message.tool_calls:
+						try:
+							summary = tool_call["args"]["action_summary"]
+						except:
+							summary = ""
+						total_summary = total_summary + " " + summary
+			total_summary = total_summary.strip()
+			return total_summary
+
 		"""Run the planner to analyze state and suggest next steps"""
 		# Skip planning if no planner_llm is set
 		if not self.planner_llm:
 			return None
 
+		current_window_summary = ""
+		other_window_summary = ""
+		for index in range(self.number_of_browser_windows):
+			summary = get_agent_summary(self.message_manager[index].get_messages())
+			if index == window_index:
+				current_window_summary = "- " + summary
+			else:
+				other_window_summary = (other_window_summary + "\n").lstrip() + "- " + summary
+
+		content = f"""Agent Action Summary in Current Window:
+{current_window_summary}
+
+Agent Action Summary in Other Windows:
+{other_window_summary}
+		"""
+		logger.info("Agent Summary: " + content)
 		# Create planner message history using full message history
 		planner_messages = [
 			PlannerPrompt(self.action_descriptions).get_system_message(),
 			*self.message_manager[window_index].get_messages()[1:],  # Use full message history except the first
+			HumanMessage(content=content)
 		]
 
 		if not self.use_vision_for_planner and self.use_vision:
@@ -1406,12 +1435,11 @@ class Agent:
 		# Create explorer message history using full message history
 		explorer_messages = [
 			ExplorerPrompt(self.action_descriptions).get_system_message(self.number_of_browser_windows),
-			*self.message_manager[window_index].get_messages(),  # Use full message history except the first
+			*self.message_manager[window_index].get_messages()[1:],  # Use full message history except the first
 		]
 
 		explorer_messages = self._convert_input_messages(explorer_messages, self.explorer_model_name, window_index)
 		# Get explorer output
-		del explorer_messages[1] # deleting the system message of browser agent as it would confuse the explorer agent.
 		response = await self.explorer_llm.ainvoke(explorer_messages)
 		plan = response.content
 		# if deepseek-reasoner, remove think tags
